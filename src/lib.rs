@@ -49,32 +49,9 @@ impl<'a> CommandLine<'a> {
         self.commands.get_mut(name)
     }
 
-    pub fn run(&mut self, input: &str) -> ExecResult {
-        let parsed_syntax_res = parsing::parse(self, input);
-
-        if parsed_syntax_res.is_err() {
-            return ExecResult::Err(parsed_syntax_res.err().unwrap());
-        }
-
-        let parsed_syntax = parsed_syntax_res.ok().unwrap();
-
-        ExecResult::Ok {
-            subcommand: parsed_syntax.subcommand_id,
-            command: parsed_syntax.command_name,
-            parameters: parsed_syntax.parameters,
-            options: parsed_syntax.options,
-        }
+    pub fn run(&mut self, input: &str) -> Result<ParsedCommand, ParseError> {
+        parsing::parse(self, input)        
     }
-}
-
-pub enum ExecResult<'a> {
-    Err(ParseError),
-    Ok {
-        command: &'a str,
-        subcommand: &'a str,
-        parameters: Vec<Parameter>,
-        options: Vec<Opt>,
-    },
 }
 
 pub enum ParameterVal {
@@ -91,9 +68,9 @@ pub struct Parameter {
 impl std::fmt::Display for Parameter {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match &self.val {
-            ParameterVal::Text(s) => write!(f, "{}", s.as_str()),
-            ParameterVal::I32(n) => write!(f, "{}", n.to_string()),
-            ParameterVal::U32(n) => write!(f, "{}", n.to_string()),
+            ParameterVal::Text(s) => write!(f, "{}", s),
+            ParameterVal::I32(n) => write!(f, "{}", n),
+            ParameterVal::U32(n) => write!(f, "{}", n),
             ParameterVal::List(l) => {
                 let mut res = String::with_capacity(l.len() * 3);
                 let mut i = 1;
@@ -109,7 +86,7 @@ impl std::fmt::Display for Parameter {
                 }
 
                 res.push(']');
-                f.write_str(res.as_str())
+                write!(f, "{}", res)
             }
         }
     }
@@ -139,6 +116,7 @@ impl std::fmt::Display for ParameterKind {
             ParameterKind::List(_) => PARAM_KIND_LIST_STR,
             ParameterKind::None => PARAM_KIND_NONE_STR,
         };
+
         f.write_str(name)
     }
 }
@@ -168,10 +146,8 @@ impl FromStr for ParameterKind {
                         }
                     }
 
-                    let element_type = ParameterKind::from_str(raw_element_type.as_str());
-
-                    if element_type.is_ok() {
-                        return Ok(ParameterKind::List(Box::new(element_type.unwrap())));
+                    if let Some(e) = ParameterKind::from_str(raw_element_type.as_str()).ok() {
+                        return Ok(ParameterKind::List(Box::new(e)));
                     }
                 }
 
@@ -181,6 +157,7 @@ impl FromStr for ParameterKind {
     }
 }
 
+#[derive(Clone)]
 pub struct OptionData {
     pub short_flags: Vec<char>,
     pub long_flags: Vec<String>,
@@ -188,7 +165,7 @@ pub struct OptionData {
 }
 
 pub struct Opt {
-    data: std::rc::Rc<OptionData>,
+    data: OptionData,
     parameter: Option<Parameter>,
 }
 
@@ -215,19 +192,16 @@ pub struct Command<'a> {
     subcommands: Vec<Command<'a>>,
     //branches_need_sort: bool,
     param_types: Vec<ParameterKind>,
-    options: Vec<std::rc::Rc<OptionData>>,
+    options: Vec<OptionData>,
 }
 
 impl<'a> Command<'a> {
     pub fn new(aliases: Vec<&'a str>) -> Self {
-        let tmp_aliases = aliases.clone();
-        let name = tmp_aliases
+        let aliases_tmp = aliases.clone();
+        let name = aliases_tmp
             .get(0)
+            .filter(|v| !v.is_empty())
             .expect("at least one alias must be specified");
-
-        if name.is_empty() {
-            panic!("at least one alias must be specified");
-        }
 
         Self {
             aliases,
@@ -241,20 +215,16 @@ impl<'a> Command<'a> {
 
     pub fn add_subcommand(mut self, subcommand: Command<'a>) -> Self {
         self.subcommands.push(subcommand);
+        
         self
     }
 
     pub fn set_syntax_format(mut self, format: &str) -> Self {
-        let parse_result = parsing::parse_params_and_options(format);
-
-        if let Err(e) = parse_result {
-            panic!(e);
-        }
-
-        let (mut param_types, mut options) = parse_result.unwrap();
+        let (mut param_types, mut options) = parsing::parse_params_and_options(format).unwrap_or_else(|e| panic!(e));
 
         self.param_types.append(&mut param_types);
         self.options.append(&mut options);
+
         self
     }
 }
@@ -359,106 +329,74 @@ impl<'a> ParamAccessor for Iter<'a, Parameter> {
     }
 }
 
+pub struct ParsedCommand<'a> {
+    pub name: &'a str,
+    pub subcommand_id: &'a str, // Option<&'a str>,
+    pub parameters: Vec<Parameter>,
+    pub options: Vec<Opt>,
+}
+
 mod parsing {
     use super::*;
-
-    pub struct SyntaxTree<'a> {
-        pub command_name: &'a str,
-        pub subcommand_id: &'a str, // Option<&'a str>,
-        pub parameters: Vec<Parameter>,
-        pub options: Vec<Opt>,
-    }
 
     pub fn parse<'b, 'a: 'b>(
         command_line: &'b mut CommandLine<'a>,
         input: &str,
-    ) -> Result<SyntaxTree<'b>, ParseError> {
+    ) -> Result<ParsedCommand<'b>, ParseError> {
         let param_parts = parse_input_parts(input);
         let mut param_parts = param_parts.into_iter();
-        let command_name_res = param_parts.next();
-
-        if command_name_res.is_none() {
-            return Err(ParseError::InvalidSyntax(0));
-        }
-
-        let command_name = command_name_res.unwrap();
-        let command_res = command_line.lookup_mut(command_name.as_str());
-
-        if command_res.is_none() {
-            return Err(ParseError::UnknownCommand);
-        }
-
-        let command = command_res.unwrap();
+        let command_name = param_parts.next().ok_or_else(|| ParseError::InvalidSyntax(0))?;
+        let command = command_line.lookup_mut(command_name.as_str()).ok_or(ParseError::UnknownCommand)?;
         let mut peekable_parts = param_parts.peekable();
         let (mut selected_subcommand_id, mut param_types, mut options_data) =
             ("", &command.param_types, &command.options);
 
         if !command.subcommands.is_empty() {
-            let selected_subcommand_lookup_res =
-                command.subcommands.iter().try_fold(Option::None, |_, cmd| {
-                    let mut tmp_peekable_parts = peekable_parts.clone();
-                    let possible_alias_res = tmp_peekable_parts.next();
+            let (sub_id, sub) = command.subcommands.iter().try_fold(Option::None, |_, cmd| {
+                let mut tmp_peekable_parts = peekable_parts.clone();
+                let possible_alias = tmp_peekable_parts.next().ok_or(Option::None)?;
 
-                    if possible_alias_res.is_none() {
-                        return Err(Option::None);
-                    }
+                for alias in cmd.aliases.iter() {
+                    if alias == &possible_alias {
+                        if cmd.subcommands.is_empty() {
+                            peekable_parts = tmp_peekable_parts;
 
-                    let possible_alias = possible_alias_res.unwrap();
+                            return Err(Option::Some((cmd.id.as_str(), cmd)));
+                        } else {
+                            let (found_match, res) = check_subcommands(&mut tmp_peekable_parts, cmd);
 
-                    for alias in cmd.aliases.iter() {
-                        if alias == &possible_alias {
-                            if cmd.subcommands.is_empty() {
+                            if found_match {
                                 peekable_parts = tmp_peekable_parts;
-
-                                return Err(Option::Some((cmd.id.as_str(), cmd)));
-                            } else {
-                                let (found_match, res) =
-                                    check_subcommands(&mut tmp_peekable_parts, cmd);
-
-                                if found_match {
-                                    peekable_parts = tmp_peekable_parts;
-                                }
-
-                                return res;
                             }
+
+                            return res;
                         }
                     }
+                }
 
-                    return Ok(Option::None);
-                });
+                return Ok(Option::None);
+            })
+            .err()
+            .ok_or(ParseError::MissingSubcommand)?
+            .ok_or(ParseError::MissingSubcommand)?;
 
-            let selected_subcommand_pair_res = if selected_subcommand_lookup_res.is_ok() {
-                selected_subcommand_lookup_res.ok().unwrap()
-            } else {
-                selected_subcommand_lookup_res.err().unwrap()
-            };
-
-            if let Some((id, cmd)) = selected_subcommand_pair_res {
-                selected_subcommand_id = id;
-                param_types = &cmd.param_types;
-                options_data = &cmd.options;
-            } else {
-                return Result::Err(ParseError::MissingSubcommand);
-            }
+            selected_subcommand_id = sub_id;
+            param_types = &sub.param_types;
+            options_data = &sub.options;
         }
 
         let mut parameters: Vec<Parameter> = Vec::new();
         let mut options: Vec<Opt> = Vec::new();
-        let mut pending_opt: Option<std::rc::Rc<OptionData>> = Option::None;
+        let mut pending_opt: Option<OptionData> = Option::None;
         let mut param_idx = 0;
 
         'parts_loop: while let Some(part) = peekable_parts.next() {
-            if pending_opt.is_some() {
-                let opt = pending_opt.unwrap();
-                let result = parse_param(part.to_owned(), &opt.param_kind);
-
-                if result.is_none() {
-                    return Err(ParseError::InvalidParameter(part.to_owned()));
-                }
+            if let Some(opt) = pending_opt {
+                let result = parse_param(part.to_owned(), &opt.param_kind).ok_or_else(|| ParseError::InvalidParameter(part.to_owned()))?;
 
                 options.push(Opt {
                     data: opt,
-                    parameter: Option::Some(result.unwrap()),
+                    parameter: Option::Some(result),
                 });
 
                 pending_opt = Option::None;
@@ -484,37 +422,28 @@ mod parsing {
                 }
 
                 if flag_type == FlagType::Short {
-                    let found_option = options_data
+                    let opt_data = options_data
                         .iter()
                         .find(|o| o.short_flags.contains(&c))
-                        .cloned();
+                        .cloned()
+                        .ok_or_else(|| ParseError::UnnecessaryFlag(c.to_string()))?;
 
-                    if found_option.is_none() {
-                        return Err(ParseError::UnnecessaryFlag(c.to_string())); //TODO: ignore?
-                    }
-
-                    let found_option = found_option.unwrap();
-
-                    if found_option.param_kind == ParameterKind::None {
+                    if opt_data.param_kind == ParameterKind::None {
                         options.push(Opt {
-                            data: found_option,
+                            data: opt_data,
                             parameter: Option::None,
                         });
                     } else {
                         let raw_param = part.get(c_i + 1..).unwrap();
                         
                         if raw_param.is_empty() { 
-                            pending_opt = Option::Some(found_option);
+                            pending_opt = Option::Some(opt_data);
                         } else {
-                            let result = parse_param(raw_param.to_owned(), &found_option.param_kind);
-
-                            if result.is_none() {
-                                return Err(ParseError::InvalidParameter(raw_param.to_owned()));
-                            }
-                           
                             options.push(Opt {
-                                data: found_option,
-                                parameter: Option::Some(result.unwrap()),
+                                parameter: Option::Some(parse_param(raw_param.to_owned(), &opt_data.param_kind)
+                                               .ok_or_else(|| ParseError::InvalidParameter(raw_param.to_owned()))?
+                                ), 
+                                data: opt_data,
                             });
                         }
 
@@ -527,57 +456,41 @@ mod parsing {
                 let mut part = part.clone();
                 part.remove(0);
                 part.remove(0);
-                let found_option = options_data
+                let opt_data = options_data
                     .iter()
                     .find(|o| o.long_flags.contains(&part))
-                    .cloned();
+                    .cloned()
+                    .ok_or_else(|| ParseError::UnnecessaryFlag(part))?;
 
-                if found_option.is_none() {
-                    return Err(ParseError::UnnecessaryFlag(part));
-                }
-
-                let found_option = found_option.unwrap();
-
-                if found_option.param_kind == ParameterKind::None {
+                if opt_data.param_kind == ParameterKind::None {
                     options.push(Opt {
-                        data: found_option,
+                        data: opt_data,
                         parameter: Option::None,
                     });
                 } else {
-                    pending_opt = Option::Some(found_option);
+                    pending_opt = Option::Some(opt_data);
                 }
 
                 continue;
             }
 
-            let param_type_res = param_types.get(param_idx);
+            let param_type = param_types.get(param_idx).ok_or_else(|| ParseError::UnnecessaryParameter(part.to_string()))?;
+            let param = parse_param(part.clone(), &param_type).ok_or_else(|| ParseError::InvalidParameter(part.to_owned()))?;
 
-            if param_type_res.is_none() {
-                return Err(ParseError::UnnecessaryParameter(part.to_string()));
-            }
-
-            let param_type = param_type_res.unwrap();
-            let result = parse_param(part.clone(), &param_type);
-
-            if result.is_none() {
-                return Err(ParseError::InvalidParameter(part.to_owned()));
-            }
-
-            parameters.push(result.unwrap());
+            parameters.push(param);
             param_idx += 1;           
         }
 
-        if pending_opt.is_some() {
-            let opt = pending_opt.unwrap();
-            return Err(ParseError::MissingParameter(opt.param_kind.clone()));
+        if let Some(opt) = pending_opt {
+            return Err(ParseError::MissingParameter(opt.param_kind));
         }
 
-        return Ok(SyntaxTree {
-            command_name: command.name,
+        Ok(ParsedCommand {
+            name: command.name,
             subcommand_id: selected_subcommand_id,
             parameters,
             options,
-        });
+        })
     }
 
     fn check_subcommands<'a>(
@@ -591,7 +504,7 @@ mod parsing {
             for sub_sub in cmd.subcommands.iter() {
                 for alias in sub_sub.aliases.iter() {
                     if alias == &possible_alias {
-                        return (true, Result::Err(Option::Some((&sub_sub.id, &sub_sub))));
+                        return (true, Err(Option::Some((&sub_sub.id, &sub_sub))));
                     }
                 }
 
@@ -604,10 +517,10 @@ mod parsing {
                 }
             }
         } else {
-            return (false, Result::Err(Option::None));
+            return (false, Err(Option::None));
         }
 
-        return (false, Result::Ok(Option::None));
+        return (false, Ok(Option::None));
     }
 
     #[derive(PartialEq)]
@@ -626,7 +539,7 @@ mod parsing {
 
     pub fn parse_params_and_options(
         format: &str,
-    ) -> Result<(Vec<ParameterKind>, Vec<std::rc::Rc<OptionData>>), String> {
+    ) -> Result<(Vec<ParameterKind>, Vec<OptionData>), String> {
         let mut parameter_kinds = Vec::new();
         let mut options = Vec::new();
         let mut pending_kind = ParameterKind::None;
@@ -637,11 +550,7 @@ mod parsing {
         let mut opt_short_flags = Vec::new();
         let mut opt_long_flags = Vec::new();
 
-        for c in format.chars() {
-            if c.is_whitespace() {
-                continue;
-            }
-
+        for c in format.chars().filter(|c| !c.is_whitespace()) {
             let mut ignore_curr = false;
 
             if pending_kind != ParameterKind::None {
@@ -651,11 +560,11 @@ mod parsing {
                 }
 
                 if opt_status == OptionParseStatus::NeedsParameter {
-                    options.push(std::rc::Rc::new(OptionData {
+                    options.push(OptionData {
                         long_flags: opt_long_flags.clone(),
                         short_flags: opt_short_flags.clone(),
                         param_kind: pending_kind.clone(),
-                    }));
+                    });
 
                     opt_long_flags.clear();
                     opt_short_flags.clear();
@@ -677,11 +586,11 @@ mod parsing {
                 if !waiting_opt_desc {
                     if c == '(' {
                         if opt_status == OptionParseStatus::Waiting {
-                            options.push(std::rc::Rc::new(OptionData {
+                            options.push(OptionData {
                                 long_flags: opt_long_flags.clone(),
                                 short_flags: opt_short_flags.clone(),
                                 param_kind: pending_kind.clone(),
-                            }));
+                            });
 
                             opt_long_flags.clear();
                             opt_short_flags.clear();
@@ -695,7 +604,7 @@ mod parsing {
                             let kind = get_param_kind(c);
 
                             if kind == ParameterKind::None {
-                                return Result::Err(
+                                return Err(
                                     "unexpected character after option".to_owned(),
                                 );
                             } else {
@@ -706,7 +615,7 @@ mod parsing {
                             continue;
                         }
 
-                        return Result::Err(format!("unexpected character: {}", c));
+                        return Err(format!("unexpected character: {}", c));
                     }
                 } else {
                     if c == ',' {
@@ -739,7 +648,7 @@ mod parsing {
                 let kind = get_param_kind(c);
 
                 if kind == ParameterKind::None {
-                    return Result::Err(format!("invalid parameter kind: {}", c));
+                    return Err(format!("invalid parameter kind: {}", c));
                 } else {
                     pending_kind = kind;
                 }
@@ -757,16 +666,16 @@ mod parsing {
         }
 
         if opt_status != OptionParseStatus::Ready {
-            options.push(std::rc::Rc::new(OptionData {
+            options.push(OptionData {
                 long_flags: opt_long_flags,
                 short_flags: opt_short_flags,
-                param_kind: pending_kind.clone(),
-            }));
+                param_kind: pending_kind,
+            });
         } else if pending_kind != ParameterKind::None {
             parameter_kinds.push(pending_kind);
         }
 
-        return Result::Ok((parameter_kinds, options));
+        return Ok((parameter_kinds, options));
     }
 
     fn is_list_param(c: char) -> bool {
@@ -787,17 +696,17 @@ mod parsing {
         let mut curr_part = String::new();
         let mut is_in_compound_param = false;
         let mut was_in_compound_param = false;
-        let mut last_char_was_backslash = false;
+        let mut last_char_is_backslash = false;
 
-        for (i, c) in input.chars().enumerate() {
-            if last_char_was_backslash {
+        for c in input.chars() {
+            if last_char_is_backslash {
                 if c == '\\' {
                     curr_part.push('\\');
                 } else {
                     curr_part.push(c);
                 }
 
-                last_char_was_backslash = false;
+                last_char_is_backslash = false;
             } else {
                 match c {
                     '[' => {
@@ -833,19 +742,17 @@ mod parsing {
                         }
                     }
                     '\\' => {
-                        last_char_was_backslash = true;
+                        last_char_is_backslash = true;
                     }
                     _ => {
                         curr_part.push(c);
                     }
                 }
             }
+        }
 
-            if i == input.len() - 1 && !curr_part.is_empty() {
-                param_parts.push(curr_part.to_owned());
-
-                break;
-            }
+        if !curr_part.is_empty() {
+            param_parts.push(curr_part.to_owned());
         }
 
         param_parts
@@ -854,70 +761,44 @@ mod parsing {
     fn parse_param(raw_param: String, param_type: &ParameterKind) -> Option<Parameter> {
         match param_type {
             ParameterKind::Text => {
-                return Some(Parameter {
-                    val: ParameterVal::Text(raw_param),
-                });
+                return Some(Parameter { val: ParameterVal::Text(raw_param) });
             }
             ParameterKind::I32 => {
-                let num_parse_res = raw_param.parse::<i32>();
-
-                if num_parse_res.is_err() {
-                    return None;
-                }
-
-                return Some(Parameter {
-                    val: ParameterVal::I32(num_parse_res.unwrap()),
-                });
+                return raw_param.parse::<i32>()
+                    .ok()
+                    .map(|v| Parameter { val: ParameterVal::I32(v) });
             }
             ParameterKind::U32 => {
-                let num_parse_res = raw_param.parse::<u32>();
-
-                if num_parse_res.is_err() {
-                    return None;
-                }
-
-                return Some(Parameter {
-                    val: ParameterVal::U32(num_parse_res.unwrap()),
-                });
+                return raw_param.parse::<u32>()
+                    .ok()
+                    .map(|v| Parameter { val: ParameterVal::U32(v) });
             }
             ParameterKind::List(t) => {
                 const ELEMENT_DELIMITER: char = ',';
 
                 let mut chars = raw_param.chars();
-                let open_char = chars.next().unwrap();
+                let first_char = chars.next().unwrap();
 
-                if open_char != '{' && open_char != '[' {
+                if first_char != '{' && first_char != '[' {
                     return None;
                 }
 
-                let close_char = chars.next_back().unwrap();
+                let last_char = chars.next_back().unwrap();
 
-                if close_char != '}' && close_char != ']' {
+                if last_char != '}' && last_char != ']' {
                     return None;
                 }
 
-                let raw_param = chars.as_str();
-                let raw_elements: Vec<&str> = raw_param.split(ELEMENT_DELIMITER).collect();
-                let mut elements: Vec<Parameter> = Vec::new();
-
-                for e in raw_elements {
-                    let e = e.trim();
-                    let res = parse_param(e.to_string(), t);
-
-                    if res.is_none() {
-                        return None;
-                    }
-
-                    elements.push(res.unwrap());
-                }
-
-                return Some(Parameter {
-                    val: ParameterVal::List(elements),
-                });
+                return raw_param
+                    .split(ELEMENT_DELIMITER)
+                    .map(str::trim)
+                    .map(|e| parse_param(e.to_string(), t))
+                    .collect::<Option<Vec<_>>>()
+                    .map(|elements| Parameter { val: ParameterVal::List(elements) });
             }
             _ => {}
         };
 
-        return None;
+        None
     }
 }

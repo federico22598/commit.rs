@@ -1,7 +1,7 @@
-extern crate scp;
+extern crate commit;
 
-use scp::{Command, CommandLine, ExecResult, ParseError};
-use scp::{ParamAccessor, OptionAccessor};
+use commit::{CommandLine, Command, ParseError};
+use commit::{OptionAccessor, ParamAccessor};
 
 fn main() {
     let mut command_line = CommandLine::new();
@@ -9,18 +9,13 @@ fn main() {
     command_line.register(Command::new(vec!["greet"]).set_syntax_format("s-(f, from)s"));
 
     match command_line.run("greet \"John Doe\" -fMrs.\\ Doe") {
-        ExecResult::Err(e) => handle_error(e),
-        ExecResult::Ok {
-            command,
-            subcommand: _,
-            parameters,
-            options,
-        } => {
-            match command {
+        Result::Err(e) => handle_error(e),
+        Result::Ok(cmd) => {
+            match cmd.name {
                 "greet" => {
-                    println!("Hello, {}.", parameters.iter().poll());
+                    println!("Hello, {}.", cmd.parameters.iter().poll());
 
-                    if let Some(o) = options.by_long_flag("from") {
+                    if let Some(o) = cmd.options.by_long_flag("from") {
                         println!("It's {}!", o.parameter());
                     }
                 }

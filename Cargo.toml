@@ -2,9 +2,8 @@
 name = "commit"
 version = "0.1.0"
 authors = ["idkp <fredank@tutamail.com>"]
-include = ["**/*.rs", "Cargo.toml", "README.md"]
+include = ["**/*.rs", "Cargo.toml"]
 license = "AML"
 description = "A POSIX-inspired command interpreter"
 keywords = ["commands", "posix"]
-repository = "https://github.com/idkp/commit"
-readme = "README.md"
+repository = "https://github.com/idkp/commit.rs"
