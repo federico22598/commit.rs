@@ -1,10 +1,10 @@
 [package]
-name = "commit.rs"
+name = "commit"
 version = "0.1.0"
-authors = ["Foskel <fredank@tutamail.com>"]
+authors = ["idkp <fredank@tutamail.com>"]
 include = ["**/*.rs", "Cargo.toml", "README.md"]
 license = "AML"
 description = "A POSIX-inspired command interpreter"
 keywords = ["commands", "posix"]
-repository = "https://github.com/foskel/commit"
+repository = "https://github.com/idkp/commit"
 readme = "README.md"
